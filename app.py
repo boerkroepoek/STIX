@@ -1,6 +1,5 @@
 """Streamlit-app voor D-Stability-geometriebewerkingen en -export."""
 from __future__ import annotations
-
 import csv
 import hashlib
 import io
@@ -12,15 +11,10 @@ from collections.abc import Iterable
 from numbers import Real
 from pathlib import Path
 from typing import Any, Callable
-
 import plotly.graph_objects as go
 import streamlit as st
 from pydantic import BaseModel
-
-try:
-    from geolib.models.dstability import DStabilityModel
-except ImportError:
-    from geolib.models.dstability.dstability_model import DStabilityModel
+from geolib.models.dstability import DStabilityModel
 
 warnings.filterwarnings("ignore", category=UserWarning, module="requests")
 

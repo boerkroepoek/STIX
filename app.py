@@ -152,6 +152,13 @@ def extract_geometry_rows(model: DStabilityModel) -> list[dict[str, Any]]:
     return rows
 
 
+def format_csv_coordinate(value: float) -> str:
+    """Formatteer een coordinaat met een decimale komma voor de CSV-export."""
+    if not math.isfinite(value):
+        raise ValueError("Coordinaten voor CSV-export moeten eindige getallen zijn.")
+    return format(value, ".15g").replace(".", ",")
+
+
 def geometry_rows_to_csv(rows: list[dict[str, Any]]) -> bytes:
     """Converteer geometriepunten naar Excel-vriendelijke UTF-8-CSV."""
     if not rows:
@@ -173,7 +180,11 @@ def geometry_rows_to_csv(rows: list[dict[str, Any]]) -> bytes:
         lineterminator="\n",
     )
     writer.writeheader()
-    writer.writerows(rows)
+    for row in rows:
+        csv_row = dict(row)
+        csv_row["x"] = format_csv_coordinate(float(row["x"]))
+        csv_row["z"] = format_csv_coordinate(float(row["z"]))
+        writer.writerow(csv_row)
     return stream.getvalue().encode("utf-8-sig")
 
 

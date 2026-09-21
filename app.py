@@ -21,35 +21,32 @@ from pydantic import BaseModel
 
 
 def prepare_geolib_version() -> None:
-    """Herstel ontbrekende versie-informatie vóór het laden van modellen."""
+    """Herstel ontbrekende D-GEOLib-versie-informatie voor modelimports."""
     if hasattr(geolib, "__version__"):
         return
-
     try:
         geolib.__version__ = version("d-geolib")
     except PackageNotFoundError as exc:
         raise RuntimeError(
-            "De dependency 'd-geolib' is niet geïnstalleerd. "
-            "Verwijder 'geolib' uit requirements.txt en voeg "
-            "'d-geolib==2.9.1' toe."
+            "De dependency 'd-geolib' is niet geinstalleerd. Verwijder "
+            "'geolib' uit requirements.txt en voeg 'd-geolib==2.9.1' toe."
         ) from exc
 
 
 prepare_geolib_version()
 
-# Deze import moet ná prepare_geolib_version() staan.
+# Deze import moet na prepare_geolib_version() staan.
 from geolib.models.dstability import DStabilityModel  # noqa: E402
 
 warnings.filterwarnings("ignore", category=UserWarning, module="requests")
 
 LOGGER = logging.getLogger(__name__)
 RESULT_KEY = "dstability_result"
-RESULT_SCHEMA_VERSION = 5
+RESULT_SCHEMA_VERSION = 6
 OPERATION_SHIFT = "Verschuiven"
 OPERATION_MIRROR = "Spiegelen"
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 
-# Alleen veldnamen die daadwerkelijk een X-coordinaat voorstellen.
 X_FIELD_NAMES = {
     "x",
     "xcenter",
@@ -114,9 +111,10 @@ def extract_geometry_rows(model: DStabilityModel) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     geometries = getattr(model.datastructure, "geometries", None)
     for geometry_index, geometry in enumerate(iter_items(geometries), 1):
-        for layer_index, layer in enumerate(
-            iter_items(getattr(geometry, "Layers", None)), 1
-        ):
+        layers = getattr(geometry, "Layers", None)
+        if layers is None:
+            layers = getattr(geometry, "layers", None)
+        for layer_index, layer in enumerate(iter_items(layers), 1):
             layer_id = getattr(layer, "Id", None) or getattr(layer, "id", None)
             layer_name = (
                 getattr(layer, "Label", None)
@@ -124,9 +122,10 @@ def extract_geometry_rows(model: DStabilityModel) -> list[dict[str, Any]]:
                 or getattr(layer, "name", None)
                 or f"Laag {layer_index}"
             )
-            for point_index, point in enumerate(
-                iter_items(getattr(layer, "Points", None)), 1
-            ):
+            points = getattr(layer, "Points", None)
+            if points is None:
+                points = getattr(layer, "points", None)
+            for point_index, point in enumerate(iter_items(points), 1):
                 x_value = getattr(point, "X", None)
                 if x_value is None:
                     x_value = getattr(point, "x", None)
@@ -220,7 +219,7 @@ def collect_geometry_x(model: DStabilityModel) -> list[float]:
 
 
 def pydantic_field_names(model: BaseModel) -> tuple[str, ...]:
-    """Geef uitsluitend gedeclareerde veldnamen voor Pydantic 1 en 2."""
+    """Geef gedeclareerde veldnamen voor Pydantic 1 en 2."""
     fields = getattr(type(model), "model_fields", None)
     if fields is not None:
         return tuple(fields.keys())
@@ -233,14 +232,13 @@ def is_number(value: Any) -> bool:
 
 
 def transform_mapping_fields(
-    obj: Any,
     field_names: tuple[str, ...],
     get_value: Callable[[str], Any],
     set_value: Callable[[str, Any], None],
     operation: str,
     shift: float,
 ) -> set[str]:
-    """Transformeer X-velden eenmaal en retourneer afgehandelde velden."""
+    """Transformeer bekende X-velden eenmaal."""
     by_normalized = {name.casefold(): name for name in field_names}
     handled: set[str] = set()
 
@@ -258,16 +256,12 @@ def transform_mapping_fields(
                 handled.update((left_name, right_name))
 
     for field_name in field_names:
-        if field_name in handled:
-            continue
-        if field_name.casefold() not in X_FIELD_NAMES:
+        if field_name in handled or field_name.casefold() not in X_FIELD_NAMES:
             continue
         value = get_value(field_name)
         if not is_number(value):
             continue
-        transformed = float(value) + shift
-        if operation == OPERATION_MIRROR:
-            transformed = -float(value)
+        transformed = -float(value) if operation == OPERATION_MIRROR else float(value) + shift
         set_value(field_name, transformed)
         handled.add(field_name)
 
@@ -292,7 +286,6 @@ def transform_object_tree_x(
     if isinstance(obj, BaseModel):
         field_names = pydantic_field_names(obj)
         handled = transform_mapping_fields(
-            obj,
             field_names,
             lambda name: getattr(obj, name, None),
             lambda name, value: setattr(obj, name, value),
@@ -307,9 +300,8 @@ def transform_object_tree_x(
         return
 
     if isinstance(obj, dict):
-        field_names = tuple(str(key) for key in obj if isinstance(key, str))
+        field_names = tuple(key for key in obj if isinstance(key, str))
         handled = transform_mapping_fields(
-            obj,
             field_names,
             obj.get,
             obj.__setitem__,
@@ -330,14 +322,19 @@ def reverse_geometry_polygon_points(model: DStabilityModel) -> None:
     """Herstel alleen de winding order van geometrische polygonen."""
     geometries = getattr(model.datastructure, "geometries", None)
     for geometry in iter_items(geometries):
-        for layer in iter_items(getattr(geometry, "Layers", None)):
+        layers = getattr(geometry, "Layers", None)
+        if layers is None:
+            layers = getattr(geometry, "layers", None)
+        for layer in iter_items(layers):
             points = getattr(layer, "Points", None)
+            if points is None:
+                points = getattr(layer, "points", None)
             if isinstance(points, list) and len(points) > 2:
                 points.reverse()
 
 
 def shift_model_x(model: DStabilityModel, existing_x_to_zero: float) -> None:
-    """Verschuif alle gedeclareerde X-coordinaten in het model."""
+    """Verschuif alle bekende X-coordinaten in het model."""
     if not collect_geometry_x(model):
         raise ValueError("Geen geometrie gevonden in het D-Stability-bestand.")
     transform_object_tree_x(
@@ -348,7 +345,7 @@ def shift_model_x(model: DStabilityModel, existing_x_to_zero: float) -> None:
 
 
 def mirror_model_x(model: DStabilityModel) -> None:
-    """Spiegel gedeclareerde X-coordinaten rond X = 0."""
+    """Spiegel bekende X-coordinaten rond X = 0."""
     if not collect_geometry_x(model):
         raise ValueError("Geen geometrie gevonden in het D-Stability-bestand.")
     transform_object_tree_x(model.datastructure, OPERATION_MIRROR)
@@ -358,7 +355,7 @@ def mirror_model_x(model: DStabilityModel) -> None:
 def assert_close_sequences(
     actual: list[float], expected: list[float], label: str
 ) -> None:
-    """Valideer twee numerieke reeksen onafhankelijk van puntvolgorde."""
+    """Valideer numerieke reeksen onafhankelijk van puntvolgorde."""
     if len(actual) != len(expected):
         raise ValueError(f"Aantal {label} is na verwerking gewijzigd.")
     for actual_value, expected_value in zip(sorted(actual), sorted(expected)):
@@ -380,15 +377,17 @@ def validate_transformed_geometry(
 
     original_x = [row["x"] for row in original_rows]
     output_x = [row["x"] for row in output_rows]
-    if operation == OPERATION_SHIFT:
-        expected_x = [value - existing_x_to_zero for value in original_x]
-    else:
-        expected_x = [-value for value in original_x]
+    expected_x = (
+        [value - existing_x_to_zero for value in original_x]
+        if operation == OPERATION_SHIFT
+        else [-value for value in original_x]
+    )
     assert_close_sequences(output_x, expected_x, "X-coordinaten")
-
-    original_z = [row["z"] for row in original_rows]
-    output_z = [row["z"] for row in output_rows]
-    assert_close_sequences(output_z, original_z, "Z-coordinaten")
+    assert_close_sequences(
+        [row["z"] for row in output_rows],
+        [row["z"] for row in original_rows],
+        "Z-coordinaten",
+    )
 
 
 def process_stix(
@@ -396,7 +395,7 @@ def process_stix(
     operation: str,
     existing_x_to_zero: float = 0.0,
 ) -> tuple[bytes, float, float, list[dict[str, Any]]]:
-    """Bewerk STIX en valideer het geserialiseerde resultaat via roundtrip."""
+    """Bewerk STIX en valideer het resultaat via een roundtrip."""
     if not data:
         raise ValueError("Het geuploade bestand is leeg.")
     if len(data) > MAX_UPLOAD_BYTES:
@@ -440,21 +439,14 @@ def process_stix(
             float(existing_x_to_zero),
         )
         x_values = [row["x"] for row in validated_rows]
-        return (
-            output_path.read_bytes(),
-            min(x_values),
-            max(x_values),
-            validated_rows,
-        )
+        return output_path.read_bytes(), min(x_values), max(x_values), validated_rows
 
 
 def make_output_name(input_name: str, operation: str) -> str:
-    """Maak een veilige uitvoerbestandsnaam met de extensie .stix."""
-    input_path = Path(Path(input_name).name)
-    stem = input_path.stem or "dstability"
-    if operation == OPERATION_MIRROR:
-        return f"{stem}_GESPIEGELD.stix"
-    return f"{stem}_VERSCHOVEN.stix"
+    """Maak een veilige uitvoerbestandsnaam met extensie .stix."""
+    stem = Path(Path(input_name).name).stem or "dstability"
+    suffix = "GESPIEGELD" if operation == OPERATION_MIRROR else "VERSCHOVEN"
+    return f"{stem}_{suffix}.stix"
 
 
 def main() -> None:

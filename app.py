@@ -1,4 +1,4 @@
-"""Streamlit-app voor het verschuiven van X-coordinaten in D-Stability-bestanden."""
+"""Streamlit-app voor X-transformaties van D-Stability-bestanden."""
 
 from __future__ import annotations
 
@@ -7,7 +7,18 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import streamlit as st
-from geolib.models.dstability import DStabilityModel
+
+
+X_ATTRIBUTES = (
+    "x",
+    "X",
+    "x_left",
+    "x_right",
+    "XLeft",
+    "XRight",
+    "XCenter",
+)
+POINT_LIST_ATTRIBUTES = ("points", "Points", "point_ids", "PointIds")
 
 
 def iter_items(value: Any) -> Iterable[Any]:
@@ -15,7 +26,7 @@ def iter_items(value: Any) -> Iterable[Any]:
     return value or ()
 
 
-def collect_geometry_x(model: DStabilityModel) -> list[float]:
+def collect_geometry_x(model: Any) -> list[float]:
     """Verzamel alle X-coordinaten uit de geometrie van het model."""
     x_values: list[float] = []
     for geometry in iter_items(getattr(model.datastructure, "geometries", None)):
@@ -40,8 +51,8 @@ def shift_search_grid(settings: Any, attribute: str, x_shift: float) -> None:
         origin.X += x_shift
 
 
-def shift_model_x(model: DStabilityModel, new_origin: float) -> tuple[float, float]:
-    """Verschuif alle ondersteunde X-coordinaten en geef het nieuwe bereik terug."""
+def shift_model_x(model: Any, new_origin: float) -> tuple[float, float]:
+    """Verschuif ondersteunde X-coordinaten en geef het nieuwe bereik terug."""
     x_values = collect_geometry_x(model)
     if not x_values:
         raise ValueError("Geen geometrie gevonden in het D-Stability-bestand.")
@@ -60,7 +71,7 @@ def shift_model_x(model: DStabilityModel, new_origin: float) -> tuple[float, flo
         shift_point_collection(getattr(load, "Points", None), x_shift)
         for attribute in ("X", "XEnd"):
             value = getattr(load, attribute, None)
-            if value is not None:
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
                 setattr(load, attribute, value + x_shift)
 
     stages = getattr(model.datastructure, "Stages", None)
@@ -85,33 +96,128 @@ def shift_model_x(model: DStabilityModel, new_origin: float) -> tuple[float, flo
     return min(x_values) + x_shift, max(x_values) + x_shift
 
 
-def process_stix(uploaded_bytes: bytes, new_origin: float) -> tuple[bytes, float, float]:
-    """Lees STIX-bytes, verschuif het model en retourneer uitvoerbytes en bereik."""
+def model_field_names(obj: Any) -> Iterable[str]:
+    """Geef veldnamen van Pydantic V1- en V2-modellen terug."""
+    model_fields = getattr(obj, "model_fields", None)
+    if not isinstance(model_fields, dict):
+        model_fields = getattr(type(obj), "model_fields", None)
+    if isinstance(model_fields, dict):
+        return model_fields.keys()
+
+    legacy_fields = getattr(type(obj), "__fields__", None)
+    if isinstance(legacy_fields, dict):
+        return legacy_fields.keys()
+
+    return ()
+
+
+def mirror_object_tree(obj: Any, visited: set[int] | None = None) -> None:
+    """Spiegel X-waarden recursief en herstel winding order van puntenlijsten."""
+    if visited is None:
+        visited = set()
+
+    if obj is None or isinstance(obj, (str, bytes, int, float, bool)):
+        return
+    if id(obj) in visited:
+        return
+    visited.add(id(obj))
+
+    for attribute in X_ATTRIBUTES:
+        if not hasattr(obj, attribute):
+            continue
+        value = getattr(obj, attribute)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            setattr(obj, attribute, -value)
+
+    reversed_lists: set[int] = set()
+    for attribute in POINT_LIST_ATTRIBUTES:
+        value = getattr(obj, attribute, None)
+        if isinstance(value, list) and id(value) not in reversed_lists:
+            value.reverse()
+            reversed_lists.add(id(value))
+
+    if isinstance(obj, dict):
+        children = obj.values()
+    elif isinstance(obj, (list, tuple, set)):
+        children = obj
+    else:
+        children = (
+            getattr(obj, field_name)
+            for field_name in model_field_names(obj)
+            if hasattr(obj, field_name)
+        )
+
+    for child in children:
+        mirror_object_tree(child, visited)
+
+
+def mirror_model_x(model: Any) -> tuple[float, float]:
+    """Spiegel het hele datamodel in X = 0 en geef het geometriebereik terug."""
+    original_x = collect_geometry_x(model)
+    if not original_x:
+        raise ValueError("Geen geometrie gevonden in het D-Stability-bestand.")
+
+    mirror_object_tree(model.datastructure)
+    mirrored_x = collect_geometry_x(model)
+    return min(mirrored_x), max(mirrored_x)
+
+
+def load_dstability_model(input_path: Path) -> Any:
+    """Laad een D-Stability-model met de beschikbare GEOLib-import."""
+    try:
+        from geolib.models.dstability import DStabilityModel
+    except ImportError:
+        from geolib.models.dstability.dstability_model import DStabilityModel
+
+    model = DStabilityModel()
+    model.parse(input_path)
+    return model
+
+
+def process_stix(
+    uploaded_bytes: bytes,
+    operation: str,
+    new_origin: float = 0.0,
+) -> tuple[bytes, float, float]:
+    """Verwerk STIX-bytes en retourneer uitvoerbytes en nieuw X-bereik."""
     with tempfile.TemporaryDirectory() as temp_directory:
         input_path = Path(temp_directory) / "input.stix"
-        output_path = Path(temp_directory) / "shifted_input.stix"
+        output_path = Path(temp_directory) / "output.stix"
         input_path.write_bytes(uploaded_bytes)
 
-        model = DStabilityModel()
-        model.parse(input_path)
-        new_min_x, new_max_x = shift_model_x(model, new_origin)
-        model.serialize(output_path)
+        model = load_dstability_model(input_path)
+        if operation == "Verschuiven":
+            new_min_x, new_max_x = shift_model_x(model, new_origin)
+        elif operation == "Spiegelen":
+            new_min_x, new_max_x = mirror_model_x(model)
+        else:
+            raise ValueError(f"Onbekende bewerking: {operation}")
 
+        model.serialize(output_path)
         return output_path.read_bytes(), new_min_x, new_max_x
 
 
 def reset_result() -> None:
-    """Verwijder een eerder resultaat nadat de invoer is gewijzigd."""
+    """Verwijder een eerder resultaat nadat invoer is gewijzigd."""
     st.session_state.pop("result", None)
+
+
+def output_file_name(source_name: str, operation: str) -> str:
+    """Maak een veilige, herkenbare bestandsnaam voor het resultaat."""
+    source = Path(source_name).name
+    if operation == "Spiegelen":
+        path = Path(source)
+        return f"{path.stem}_GESPIEGELD{path.suffix}"
+    return f"shifted_{source}"
 
 
 def main() -> None:
     """Render de Streamlit-interface."""
-    st.set_page_config(page_title="D-Stability X-as verschuiven", page_icon="📐")
-    st.title("D-Stability X-as verschuiven")
+    st.set_page_config(page_title="D-Stability X-transformaties", page_icon="📐")
+    st.title("D-Stability X-transformaties")
     st.write(
-        "Upload een `.stix`-bestand, kies welke bestaande X-waarde het nieuwe "
-        "nulpunt wordt en download het aangepaste bestand."
+        "Upload een `.stix`-bestand en kies of je de X-as wilt verschuiven "
+        "of de volledige datastructuur wilt spiegelen in X = 0."
     )
 
     uploaded_file = st.file_uploader(
@@ -119,61 +225,76 @@ def main() -> None:
         type=["stix"],
         key="stix_file",
         on_change=reset_result,
-        help="Selecteer een D-Stability-bestand met de extensie .stix.",
     )
 
-    with st.form("shift_form"):
+    operation = st.radio(
+        "Bewerking",
+        ("Verschuiven", "Spiegelen"),
+        horizontal=True,
+        on_change=reset_result,
+    )
+
+    with st.form("transform_form"):
         new_origin = st.number_input(
             "Bestaande X-waarde die X = 0 moet worden",
             value=0.0,
             format="%.3f",
+            disabled=operation != "Verschuiven",
         )
+        if operation == "Spiegelen":
+            st.caption(
+                "Alle herkende X-coordinaten worden vermenigvuldigd met -1. "
+                "Puntenlijsten worden omgekeerd om de winding order te herstellen."
+            )
         submitted = st.form_submit_button(
-            "Verschuif X-as",
+            "Bestand verwerken",
             type="primary",
             disabled=uploaded_file is None,
         )
 
-    if submitted:
-        if uploaded_file is None:
-            st.error("Upload eerst een geldig `.stix`-bestand.")
-        else:
-            try:
-                source_bytes = uploaded_file.getvalue()
-                if not source_bytes:
-                    raise ValueError("Het geuploade bestand is leeg.")
-                output_bytes, new_min_x, new_max_x = process_stix(
-                    source_bytes,
-                    float(new_origin),
-                )
-                output_name = f"shifted_{Path(uploaded_file.name).name}"
-                st.session_state["result"] = {
-                    "bytes": output_bytes,
-                    "name": output_name,
-                    "origin": float(new_origin),
-                    "min_x": new_min_x,
-                    "max_x": new_max_x,
-                }
-            except (ValueError, OSError, AttributeError, TypeError) as exc:
-                st.session_state.pop("result", None)
-                st.error(f"Het bestand kon niet worden verwerkt: {exc}")
-            except Exception:
-                st.session_state.pop("result", None)
-                st.error(
-                    "Het bestand kon niet worden verwerkt. Controleer of het een "
-                    "geldig en ondersteund D-Stability-bestand is."
-                )
+    if submitted and uploaded_file is not None:
+        try:
+            source_bytes = uploaded_file.getvalue()
+            if not source_bytes:
+                raise ValueError("Het geuploade bestand is leeg.")
+            output_bytes, new_min_x, new_max_x = process_stix(
+                source_bytes,
+                operation,
+                float(new_origin),
+            )
+            st.session_state["result"] = {
+                "bytes": output_bytes,
+                "name": output_file_name(uploaded_file.name, operation),
+                "operation": operation,
+                "origin": float(new_origin),
+                "min_x": new_min_x,
+                "max_x": new_max_x,
+            }
+        except (ValueError, OSError, AttributeError, TypeError) as exc:
+            st.session_state.pop("result", None)
+            st.error(f"Het bestand kon niet worden verwerkt: {exc}")
+        except Exception:
+            st.session_state.pop("result", None)
+            st.error(
+                "Het bestand kon niet worden verwerkt. Controleer of het een "
+                "geldig en ondersteund D-Stability-bestand is."
+            )
 
     result = st.session_state.get("result")
     if result:
-        st.success(
-            f"De oorspronkelijke X-waarde {result['origin']:.3f} is nu X = 0.000."
-        )
+        if result["operation"] == "Verschuiven":
+            st.success(
+                f"De oorspronkelijke X-waarde {result['origin']:.3f} "
+                "is nu X = 0.000."
+            )
+        else:
+            st.success("De D-Stability-datastructuur is gespiegeld in X = 0.")
+
         col_min, col_max = st.columns(2)
         col_min.metric("Nieuwe minimale X", f"{result['min_x']:.3f}")
         col_max.metric("Nieuwe maximale X", f"{result['max_x']:.3f}")
         st.download_button(
-            "Download verschoven bestand",
+            "Download verwerkt bestand",
             data=result["bytes"],
             file_name=result["name"],
             mime="application/octet-stream",

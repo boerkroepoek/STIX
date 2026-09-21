@@ -1,4 +1,4 @@
-streamlit
-plotly
-pydantic
-geolib
+streamlit>=1.40,<2
+plotly>=5.24,<7
+pydantic>=2.10,<3
+d-geolib==2.9.1

@@ -1,5 +1,6 @@
 """Streamlit-app voor D-Stability-geometriebewerkingen en -export."""
 from __future__ import annotations
+
 import csv
 import hashlib
 import io
@@ -8,13 +9,36 @@ import math
 import tempfile
 import warnings
 from collections.abc import Iterable
+from importlib.metadata import PackageNotFoundError, version
 from numbers import Real
 from pathlib import Path
 from typing import Any, Callable
+
+import geolib
 import plotly.graph_objects as go
 import streamlit as st
 from pydantic import BaseModel
-from geolib.models.dstability import DStabilityModel
+
+
+def prepare_geolib_version() -> None:
+    """Herstel ontbrekende versie-informatie vóór het laden van modellen."""
+    if hasattr(geolib, "__version__"):
+        return
+
+    try:
+        geolib.__version__ = version("d-geolib")
+    except PackageNotFoundError as exc:
+        raise RuntimeError(
+            "De dependency 'd-geolib' is niet geïnstalleerd. "
+            "Verwijder 'geolib' uit requirements.txt en voeg "
+            "'d-geolib==2.9.1' toe."
+        ) from exc
+
+
+prepare_geolib_version()
+
+# Deze import moet ná prepare_geolib_version() staan.
+from geolib.models.dstability import DStabilityModel  # noqa: E402
 
 warnings.filterwarnings("ignore", category=UserWarning, module="requests")
 

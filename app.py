@@ -42,7 +42,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module="requests")
 
 LOGGER = logging.getLogger(__name__)
 RESULT_KEY = "dstability_result"
-RESULT_SCHEMA_VERSION = 6
+RESULT_SCHEMA_VERSION = 7
 OPERATION_SHIFT = "Verschuiven"
 OPERATION_MIRROR = "Spiegelen"
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024
@@ -261,7 +261,11 @@ def transform_mapping_fields(
         value = get_value(field_name)
         if not is_number(value):
             continue
-        transformed = -float(value) if operation == OPERATION_MIRROR else float(value) + shift
+        transformed = (
+            -float(value)
+            if operation == OPERATION_MIRROR
+            else float(value) + shift
+        )
         set_value(field_name, transformed)
         handled.add(field_name)
 
@@ -390,6 +394,26 @@ def validate_transformed_geometry(
     )
 
 
+@st.cache_data(show_spinner=False)
+def read_original_geometry(data: bytes) -> list[dict[str, Any]]:
+    """Lees geometrie uit een STIX-bestand zonder het model te wijzigen."""
+    if not data:
+        raise ValueError("Het geuploade bestand is leeg.")
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise ValueError("Het bestand is groter dan de toegestane 100 MB.")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        input_path = Path(temp_dir) / "input.stix"
+        input_path.write_bytes(data)
+
+        model = DStabilityModel()
+        model.parse(input_path)
+        rows = extract_geometry_rows(model)
+        if not rows:
+            raise ValueError("Geen geometrie gevonden in het D-Stability-bestand.")
+        return rows
+
+
 def process_stix(
     data: bytes,
     operation: str,
@@ -449,24 +473,62 @@ def make_output_name(input_name: str, operation: str) -> str:
     return f"{stem}_{suffix}.stix"
 
 
-def main() -> None:
-    """Render de Streamlit-app."""
-    st.set_page_config(
-        page_title="D-Stability geometriebewerker",
-        page_icon="📐",
-    )
-    st.title("D-Stability geometriebewerker")
-    st.write(
-        "Upload een `.stix`-bestand, kies een bewerking en bekijk of download "
-        "de resulterende geometrie."
+def make_original_csv_name(input_name: str) -> str:
+    """Maak een veilige bestandsnaam voor de oorspronkelijke geometrie-CSV."""
+    stem = Path(Path(input_name).name).stem or "dstability"
+    return f"{stem}_geometrie_origineel.csv"
+
+
+def render_original_geometry_tab(input_data: bytes, input_name: str) -> None:
+    """Toon en exporteer de oorspronkelijke, ongewijzigde geometrie."""
+    st.subheader("Oorspronkelijke geometrie")
+    st.caption(
+        "De geometrie wordt rechtstreeks uit het geuploade bestand gelezen. "
+        "Er wordt geen verschuiving of spiegeling toegepast."
     )
 
-    uploaded = st.file_uploader(
-        "D-Stability-bestand",
-        type=["stix"],
-        key="stix_upload",
-        on_change=clear_result,
+    try:
+        with st.spinner("Geometrie uitlezen..."):
+            original_rows = read_original_geometry(input_data)
+    except (ValueError, OSError, AttributeError, TypeError) as exc:
+        st.error(f"De geometrie kon niet worden gelezen: {exc}")
+        return
+    except Exception:
+        LOGGER.exception("Onverwachte fout bij uitlezen van geometrie")
+        st.error(
+            "De geometrie kon niet worden gelezen. Controleer het "
+            "STIX-bestand of neem contact op met de beheerder."
+        )
+        return
+
+    x_values = [row["x"] for row in original_rows]
+    left, middle, right = st.columns(3)
+    left.metric("Minimale X", f"{min(x_values):.3f}")
+    middle.metric("Maximale X", f"{max(x_values):.3f}")
+    right.metric("Aantal geometriepunten", len(original_rows))
+
+    st.plotly_chart(
+        build_geometry_figure(original_rows),
+        use_container_width=True,
+        key="original_geometry_chart",
     )
+    st.download_button(
+        "Download oorspronkelijke geometrie als CSV",
+        data=geometry_rows_to_csv(original_rows),
+        file_name=make_original_csv_name(input_name),
+        mime="text/csv",
+        key="download_original_geometry_csv",
+        type="primary",
+    )
+
+
+def render_edit_tab(
+    input_data: bytes,
+    input_name: str,
+    input_digest: str,
+) -> None:
+    """Toon bewerkingen en downloads voor het aangepaste model."""
+    st.subheader("Geometrie bewerken")
     operation = st.radio(
         "Bewerking",
         (OPERATION_SHIFT, OPERATION_MIRROR),
@@ -485,21 +547,16 @@ def main() -> None:
         submitted = st.form_submit_button(
             "Bestand verwerken",
             type="primary",
-            disabled=uploaded is None,
         )
 
-    input_data = uploaded.getvalue() if uploaded is not None else None
-    input_digest = (
-        hashlib.sha256(input_data).hexdigest() if input_data is not None else None
-    )
-
-    if submitted and uploaded is not None and input_data is not None:
+    if submitted:
         try:
-            output, min_x, max_x, rows = process_stix(
-                input_data,
-                operation,
-                float(existing_x_to_zero),
-            )
+            with st.spinner("STIX-bestand verwerken..."):
+                output, min_x, max_x, rows = process_stix(
+                    input_data,
+                    operation,
+                    float(existing_x_to_zero),
+                )
             message = (
                 f"De oorspronkelijke X-waarde {existing_x_to_zero:.3f} "
                 "is nu X = 0.000."
@@ -511,7 +568,7 @@ def main() -> None:
                 "operation": operation,
                 "input_digest": input_digest,
                 "data": output,
-                "file_name": make_output_name(uploaded.name, operation),
+                "file_name": make_output_name(input_name, operation),
                 "message": message,
                 "min_x": min_x,
                 "max_x": max_x,
@@ -530,33 +587,88 @@ def main() -> None:
 
     result = get_valid_result(input_digest, operation)
     if result is None:
+        st.info(
+            "Kies een bewerking en klik op 'Bestand verwerken' om een "
+            "aangepast STIX-bestand te maken."
+        )
         return
 
     st.success(result["message"])
-    left, right = st.columns(2)
+    left, middle, right = st.columns(3)
     left.metric("Nieuwe minimale X", f"{result['min_x']:.3f}")
-    right.metric("Nieuwe maximale X", f"{result['max_x']:.3f}")
-    st.subheader("Geometrie")
+    middle.metric("Nieuwe maximale X", f"{result['max_x']:.3f}")
+    right.metric("Aantal geometriepunten", len(result["geometry_rows"]))
+
+    st.subheader("Bewerkte geometrie")
     st.plotly_chart(
         build_geometry_figure(result["geometry_rows"]),
         use_container_width=True,
-        key="geometry_chart",
+        key="processed_geometry_chart",
     )
-    st.caption(f"{len(result['geometry_rows'])} geometriepunten gevonden.")
     st.download_button(
         "Download verwerkt STIX-bestand",
-        result["data"],
+        data=result["data"],
         file_name=result["file_name"],
         mime="application/octet-stream",
+        key="download_processed_stix",
         type="primary",
     )
     csv_name = f"{Path(result['file_name']).stem}_geometrie.csv"
     st.download_button(
-        "Download geometrie als CSV",
-        geometry_rows_to_csv(result["geometry_rows"]),
+        "Download bewerkte geometrie als CSV",
+        data=geometry_rows_to_csv(result["geometry_rows"]),
         file_name=csv_name,
         mime="text/csv",
+        key="download_processed_geometry_csv",
     )
+
+
+def main() -> None:
+    """Render de Streamlit-app."""
+    st.set_page_config(
+        page_title="D-Stability geometriebewerker",
+        page_icon="📐",
+        layout="wide",
+    )
+    st.title("D-Stability geometriebewerker")
+    st.write(
+        "Upload een `.stix`-bestand. Je kunt de oorspronkelijke geometrie "
+        "direct bekijken en downloaden, of het model verschuiven of spiegelen."
+    )
+
+    uploaded = st.file_uploader(
+        "D-Stability-bestand",
+        type=["stix"],
+        key="stix_upload",
+        on_change=clear_result,
+    )
+    if uploaded is None:
+        st.info("Upload een STIX-bestand om de geometrie te bekijken.")
+        return
+
+    try:
+        input_data = uploaded.getvalue()
+    except (AttributeError, OSError) as exc:
+        st.error(f"Het geuploade bestand kon niet worden gelezen: {exc}")
+        return
+
+    if not input_data:
+        st.error("Het geuploade bestand is leeg.")
+        return
+    if len(input_data) > MAX_UPLOAD_BYTES:
+        st.error("Het bestand is groter dan de toegestane 100 MB.")
+        return
+
+    input_digest = hashlib.sha256(input_data).hexdigest()
+    geometry_tab, edit_tab = st.tabs(
+        ["Geometrie bekijken en downloaden", "Bewerken en exporteren"]
+    )
+
+    with geometry_tab:
+        render_original_geometry_tab(input_data, uploaded.name)
+
+    with edit_tab:
+        render_edit_tab(input_data, uploaded.name, input_digest)
 
 
 if __name__ == "__main__":

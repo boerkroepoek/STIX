@@ -1,3 +1,4 @@
+pip install --upgrade pip
 streamlit>=1.40,<2.0
 geolib-plus>=0.4,<1.0
 pydantic>=1.10,<3.0

@@ -177,6 +177,72 @@ def geometry_rows_to_csv(rows: list[dict[str, Any]]) -> bytes:
     return stream.getvalue().encode("utf-8-sig")
 
 
+def extract_cross_section_rows(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Bepaal de bovencontour van alle geometrische laagpolygonen."""
+    if not rows:
+        raise ValueError("Geen geometriepunten beschikbaar voor het dwarsprofiel.")
+
+    grouped: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    for row in rows:
+        key = (row["geometry_index"], row["layer_index"])
+        grouped.setdefault(key, []).append(row)
+
+    segments: list[tuple[float, float, float, float]] = []
+    x_coordinates: set[float] = set()
+    for layer_rows in grouped.values():
+        ordered = sorted(layer_rows, key=lambda item: item["point_index"])
+        if not ordered:
+            continue
+        x_coordinates.update(float(row["x"]) for row in ordered)
+        polygon = ordered + [ordered[0]] if len(ordered) > 2 else ordered
+        for start, end in zip(polygon, polygon[1:]):
+            segments.append(
+                (
+                    float(start["x"]),
+                    float(start["z"]),
+                    float(end["x"]),
+                    float(end["z"]),
+                )
+            )
+
+    profile: list[dict[str, Any]] = []
+    tolerance = 1e-9
+    for point_index, x_value in enumerate(sorted(x_coordinates), 1):
+        intersections: list[float] = []
+        for x_start, z_start, x_end, z_end in segments:
+            minimum_x = min(x_start, x_end) - tolerance
+            maximum_x = max(x_start, x_end) + tolerance
+            if not minimum_x <= x_value <= maximum_x:
+                continue
+            if math.isclose(x_start, x_end, abs_tol=tolerance):
+                if math.isclose(x_value, x_start, abs_tol=tolerance):
+                    intersections.extend((z_start, z_end))
+                continue
+            fraction = (x_value - x_start) / (x_end - x_start)
+            intersections.append(z_start + fraction * (z_end - z_start))
+
+        if intersections:
+            profile.append(
+                {
+                    "geometry_index": 1,
+                    "layer_index": 0,
+                    "layer_id": "",
+                    "layer_name": "Dwarsprofiel",
+                    "point_index": point_index,
+                    "x": x_value,
+                    "z": max(intersections),
+                }
+            )
+
+    if len(profile) < 2:
+        raise ValueError(
+            "Het dwarsprofiel kon niet uit de geometrie worden bepaald."
+        )
+    return profile
+
+
 def build_geometry_figure(rows: list[dict[str, Any]]) -> go.Figure:
     """Bouw een interactieve geometriegrafiek met een spoor per laag."""
     figure = go.Figure()
@@ -473,10 +539,11 @@ def make_output_name(input_name: str, operation: str) -> str:
     return f"{stem}_{suffix}.stix"
 
 
-def make_original_csv_name(input_name: str) -> str:
-    """Maak een veilige bestandsnaam voor de oorspronkelijke geometrie-CSV."""
+def make_original_csv_name(input_name: str, export_type: str) -> str:
+    """Maak een veilige CSV-bestandsnaam voor het gekozen exporttype."""
     stem = Path(Path(input_name).name).stem or "dstability"
-    return f"{stem}_geometrie_origineel.csv"
+    suffix = "dwarsprofiel" if export_type == "Enkel dwarsprofiel" else "geometrie"
+    return f"{stem}_{suffix}_origineel.csv"
 
 
 def render_original_geometry_tab(input_data: bytes, input_name: str) -> None:
@@ -512,10 +579,35 @@ def render_original_geometry_tab(input_data: bytes, input_name: str) -> None:
         use_container_width=True,
         key="original_geometry_chart",
     )
+    st.divider()
+    st.subheader("CSV-export")
+    export_type = st.radio(
+        "Welke gegevens wil je downloaden?",
+        ("Volledige geometrie", "Enkel dwarsprofiel"),
+        horizontal=True,
+        key="original_geometry_export_type",
+    )
+
+    export_rows = (
+        extract_cross_section_rows(original_rows)
+        if export_type == "Enkel dwarsprofiel"
+        else original_rows
+    )
+    if export_type == "Enkel dwarsprofiel":
+        st.caption(
+            "Het dwarsprofiel is de bovencontour van de geometrie: per "
+            "X-positie wordt de hoogste doorsnijding met de laagpolygonen gebruikt."
+        )
+        st.plotly_chart(
+            build_geometry_figure(export_rows),
+            use_container_width=True,
+            key="original_cross_section_chart",
+        )
+
     st.download_button(
-        "Download oorspronkelijke geometrie als CSV",
-        data=geometry_rows_to_csv(original_rows),
-        file_name=make_original_csv_name(input_name),
+        f"Download {export_type.lower()} als CSV",
+        data=geometry_rows_to_csv(export_rows),
+        file_name=make_original_csv_name(input_name, export_type),
         mime="text/csv",
         key="download_original_geometry_csv",
         type="primary",

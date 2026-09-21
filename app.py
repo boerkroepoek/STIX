@@ -42,20 +42,14 @@ warnings.filterwarnings("ignore", category=UserWarning, module="requests")
 
 LOGGER = logging.getLogger(__name__)
 RESULT_KEY = "dstability_result"
-RESULT_SCHEMA_VERSION = 7
+RESULT_SCHEMA_VERSION = 8
 OPERATION_SHIFT = "Verschuiven"
 OPERATION_MIRROR = "Spiegelen"
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 
 X_FIELD_NAMES = {
-    "x",
-    "xcenter",
-    "xcentre",
-    "xcoordinate",
-    "xend",
-    "xleft",
-    "xright",
-    "xstart",
+    "x", "xcenter", "xcentre", "xcoordinate", "xend", "xleft",
+    "xright", "xstart",
 }
 MIRROR_FIELD_PAIRS = (
     ("x", "xend"),
@@ -74,22 +68,12 @@ def clear_result() -> None:
     st.session_state.pop(RESULT_KEY, None)
 
 
-def get_valid_result(
-    input_digest: str | None = None,
-    operation: str | None = None,
-) -> dict[str, Any] | None:
+def get_valid_result(input_digest: str | None = None) -> dict[str, Any] | None:
     """Lees alleen een volledig resultaat voor invoer en schemaversie."""
     result = st.session_state.get(RESULT_KEY)
     required = {
-        "schema_version",
-        "operation",
-        "input_digest",
-        "data",
-        "file_name",
-        "message",
-        "min_x",
-        "max_x",
-        "geometry_rows",
+        "schema_version", "operation", "input_digest", "data", "file_name",
+        "message", "min_x", "max_x", "geometry_rows",
     }
     if not isinstance(result, dict) or not required.issubset(result):
         clear_result()
@@ -98,9 +82,6 @@ def get_valid_result(
         clear_result()
         return None
     if input_digest is not None and result.get("input_digest") != input_digest:
-        clear_result()
-        return None
-    if operation is not None and result.get("operation") != operation:
         clear_result()
         return None
     return result
@@ -138,25 +119,16 @@ def extract_geometry_rows(model: DStabilityModel) -> list[dict[str, Any]]:
                     z_value = getattr(point, "y", None)
                 if x_value is None or z_value is None:
                     continue
-                rows.append(
-                    {
-                        "geometry_index": geometry_index,
-                        "layer_index": layer_index,
-                        "layer_id": "" if layer_id is None else str(layer_id),
-                        "layer_name": str(layer_name),
-                        "point_index": point_index,
-                        "x": float(x_value),
-                        "z": float(z_value),
-                    }
-                )
+                rows.append({
+                    "geometry_index": geometry_index,
+                    "layer_index": layer_index,
+                    "layer_id": "" if layer_id is None else str(layer_id),
+                    "layer_name": str(layer_name),
+                    "point_index": point_index,
+                    "x": float(x_value),
+                    "z": float(z_value),
+                })
     return rows
-
-
-def format_csv_coordinate(value: float) -> str:
-    """Formatteer een coordinaat met een decimale komma voor de CSV-export."""
-    if not math.isfinite(value):
-        raise ValueError("Coordinaten voor CSV-export moeten eindige getallen zijn.")
-    return format(value, ".15g").replace(".", ",")
 
 
 def geometry_rows_to_csv(rows: list[dict[str, Any]]) -> bytes:
@@ -164,97 +136,21 @@ def geometry_rows_to_csv(rows: list[dict[str, Any]]) -> bytes:
     if not rows:
         raise ValueError("Geen geometriepunten beschikbaar voor CSV-export.")
     fields = [
-        "geometry_index",
-        "layer_index",
-        "layer_id",
-        "layer_name",
-        "point_index",
-        "x",
-        "z",
+        "geometry_index", "layer_index", "layer_id", "layer_name",
+        "point_index", "x", "z",
     ]
     stream = io.StringIO(newline="")
     writer = csv.DictWriter(
-        stream,
-        fieldnames=fields,
-        delimiter=";",
-        lineterminator="\n",
+        stream, fieldnames=fields, delimiter=";", lineterminator="\n"
     )
     writer.writeheader()
-    for row in rows:
-        csv_row = dict(row)
-        csv_row["x"] = format_csv_coordinate(float(row["x"]))
-        csv_row["z"] = format_csv_coordinate(float(row["z"]))
-        writer.writerow(csv_row)
+    writer.writerows(rows)
     return stream.getvalue().encode("utf-8-sig")
 
 
-def extract_cross_section_rows(
-    rows: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Bepaal de bovencontour van alle geometrische laagpolygonen."""
-    if not rows:
-        raise ValueError("Geen geometriepunten beschikbaar voor het dwarsprofiel.")
-
-    grouped: dict[tuple[int, int], list[dict[str, Any]]] = {}
-    for row in rows:
-        key = (row["geometry_index"], row["layer_index"])
-        grouped.setdefault(key, []).append(row)
-
-    segments: list[tuple[float, float, float, float]] = []
-    x_coordinates: set[float] = set()
-    for layer_rows in grouped.values():
-        ordered = sorted(layer_rows, key=lambda item: item["point_index"])
-        if not ordered:
-            continue
-        x_coordinates.update(float(row["x"]) for row in ordered)
-        polygon = ordered + [ordered[0]] if len(ordered) > 2 else ordered
-        for start, end in zip(polygon, polygon[1:]):
-            segments.append(
-                (
-                    float(start["x"]),
-                    float(start["z"]),
-                    float(end["x"]),
-                    float(end["z"]),
-                )
-            )
-
-    profile: list[dict[str, Any]] = []
-    tolerance = 1e-9
-    for point_index, x_value in enumerate(sorted(x_coordinates), 1):
-        intersections: list[float] = []
-        for x_start, z_start, x_end, z_end in segments:
-            minimum_x = min(x_start, x_end) - tolerance
-            maximum_x = max(x_start, x_end) + tolerance
-            if not minimum_x <= x_value <= maximum_x:
-                continue
-            if math.isclose(x_start, x_end, abs_tol=tolerance):
-                if math.isclose(x_value, x_start, abs_tol=tolerance):
-                    intersections.extend((z_start, z_end))
-                continue
-            fraction = (x_value - x_start) / (x_end - x_start)
-            intersections.append(z_start + fraction * (z_end - z_start))
-
-        if intersections:
-            profile.append(
-                {
-                    "geometry_index": 1,
-                    "layer_index": 0,
-                    "layer_id": "",
-                    "layer_name": "Dwarsprofiel",
-                    "point_index": point_index,
-                    "x": x_value,
-                    "z": max(intersections),
-                }
-            )
-
-    if len(profile) < 2:
-        raise ValueError(
-            "Het dwarsprofiel kon niet uit de geometrie worden bepaald."
-        )
-    return profile
-
-
-def build_geometry_figure(rows: list[dict[str, Any]]) -> go.Figure:
+def build_geometry_figure(
+    rows: list[dict[str, Any]], title: str
+) -> go.Figure:
     """Bouw een interactieve geometriegrafiek met een spoor per laag."""
     figure = go.Figure()
     grouped: dict[tuple[int, int, str], list[dict[str, Any]]] = {}
@@ -265,21 +161,19 @@ def build_geometry_figure(rows: list[dict[str, Any]]) -> go.Figure:
     for (geometry_index, layer_index, layer_name), layer_rows in grouped.items():
         ordered = sorted(layer_rows, key=lambda item: item["point_index"])
         plotted = ordered + [ordered[0]] if len(ordered) > 2 else ordered
-        figure.add_trace(
-            go.Scatter(
-                x=[row["x"] for row in plotted],
-                y=[row["z"] for row in plotted],
-                mode="lines+markers",
-                name=f"G{geometry_index} L{layer_index}: {layer_name}",
-                hovertemplate=(
-                    "X=%{x:.3f}<br>Z=%{y:.3f}"
-                    "<extra>%{fullData.name}</extra>"
-                ),
-            )
-        )
+        figure.add_trace(go.Scatter(
+            x=[row["x"] for row in plotted],
+            y=[row["z"] for row in plotted],
+            mode="lines+markers",
+            name=f"G{geometry_index} L{layer_index}: {layer_name}",
+            hovertemplate=(
+                "X=%{x:.3f}<br>Z=%{y:.3f}"
+                "<extra>%{fullData.name}</extra>"
+            ),
+        ))
 
     figure.update_layout(
-        title="Geometrie uit het STIX-bestand",
+        title=title,
         xaxis_title="X",
         yaxis_title="Z",
         hovermode="closest",
@@ -318,7 +212,6 @@ def transform_mapping_fields(
     """Transformeer bekende X-velden eenmaal."""
     by_normalized = {name.casefold(): name for name in field_names}
     handled: set[str] = set()
-
     if operation == OPERATION_MIRROR:
         for left_key, right_key in MIRROR_FIELD_PAIRS:
             left_name = by_normalized.get(left_key)
@@ -339,13 +232,11 @@ def transform_mapping_fields(
         if not is_number(value):
             continue
         transformed = (
-            -float(value)
-            if operation == OPERATION_MIRROR
+            -float(value) if operation == OPERATION_MIRROR
             else float(value) + shift
         )
         set_value(field_name, transformed)
         handled.add(field_name)
-
     return handled
 
 
@@ -383,11 +274,7 @@ def transform_object_tree_x(
     if isinstance(obj, dict):
         field_names = tuple(key for key in obj if isinstance(key, str))
         handled = transform_mapping_fields(
-            field_names,
-            obj.get,
-            obj.__setitem__,
-            operation,
-            shift,
+            field_names, obj.get, obj.__setitem__, operation, shift
         )
         for key, value in obj.items():
             if key not in handled:
@@ -419,9 +306,7 @@ def shift_model_x(model: DStabilityModel, existing_x_to_zero: float) -> None:
     if not collect_geometry_x(model):
         raise ValueError("Geen geometrie gevonden in het D-Stability-bestand.")
     transform_object_tree_x(
-        model.datastructure,
-        OPERATION_SHIFT,
-        shift=-float(existing_x_to_zero),
+        model.datastructure, OPERATION_SHIFT, shift=-float(existing_x_to_zero)
     )
 
 
@@ -455,13 +340,11 @@ def validate_transformed_geometry(
     """Controleer aantallen en geometriecoordinaten na roundtrip."""
     if len(output_rows) != len(original_rows):
         raise ValueError("Het aantal geometriepunten is na verwerking gewijzigd.")
-
     original_x = [row["x"] for row in original_rows]
     output_x = [row["x"] for row in output_rows]
     expected_x = (
         [value - existing_x_to_zero for value in original_x]
-        if operation == OPERATION_SHIFT
-        else [-value for value in original_x]
+        if operation == OPERATION_SHIFT else [-value for value in original_x]
     )
     assert_close_sequences(output_x, expected_x, "X-coordinaten")
     assert_close_sequences(
@@ -478,11 +361,9 @@ def read_original_geometry(data: bytes) -> list[dict[str, Any]]:
         raise ValueError("Het geuploade bestand is leeg.")
     if len(data) > MAX_UPLOAD_BYTES:
         raise ValueError("Het bestand is groter dan de toegestane 100 MB.")
-
     with tempfile.TemporaryDirectory() as temp_dir:
         input_path = Path(temp_dir) / "input.stix"
         input_path.write_bytes(data)
-
         model = DStabilityModel()
         model.parse(input_path)
         rows = extract_geometry_rows(model)
@@ -510,7 +391,6 @@ def process_stix(
         input_path = Path(temp_dir) / "input.stix"
         output_path = Path(temp_dir) / "output.stix"
         input_path.write_bytes(data)
-
         model = DStabilityModel()
         model.parse(input_path)
         original_rows = extract_geometry_rows(model)
@@ -525,7 +405,6 @@ def process_stix(
         model.serialize(output_path)
         if not output_path.is_file() or output_path.stat().st_size == 0:
             raise ValueError("D-Stability heeft geen geldig uitvoerbestand gemaakt.")
-
         validated_model = DStabilityModel()
         validated_model.parse(output_path)
         validated_rows = extract_geometry_rows(validated_model)
@@ -534,10 +413,7 @@ def process_stix(
                 "Het uitvoerbestand is leesbaar, maar bevat geen geometriepunten."
             )
         validate_transformed_geometry(
-            original_rows,
-            validated_rows,
-            operation,
-            float(existing_x_to_zero),
+            original_rows, validated_rows, operation, float(existing_x_to_zero)
         )
         x_values = [row["x"] for row in validated_rows]
         return output_path.read_bytes(), min(x_values), max(x_values), validated_rows
@@ -550,184 +426,59 @@ def make_output_name(input_name: str, operation: str) -> str:
     return f"{stem}_{suffix}.stix"
 
 
-def make_original_csv_name(input_name: str, export_type: str) -> str:
-    """Maak een veilige CSV-bestandsnaam voor het gekozen exporttype."""
-    stem = Path(Path(input_name).name).stem or "dstability"
-    suffix = "dwarsprofiel" if export_type == "Enkel dwarsprofiel" else "geometrie"
-    return f"{stem}_{suffix}_origineel.csv"
-
-
-def render_original_geometry_tab(input_data: bytes, input_name: str) -> None:
-    """Toon en exporteer de oorspronkelijke, ongewijzigde geometrie."""
-    st.subheader("Oorspronkelijke geometrie")
-    st.caption(
-        "De geometrie wordt rechtstreeks uit het geuploade bestand gelezen. "
-        "Er wordt geen verschuiving of spiegeling toegepast."
-    )
-
-    try:
-        with st.spinner("Geometrie uitlezen..."):
-            original_rows = read_original_geometry(input_data)
-    except (ValueError, OSError, AttributeError, TypeError) as exc:
-        st.error(f"De geometrie kon niet worden gelezen: {exc}")
-        return
-    except Exception:
-        LOGGER.exception("Onverwachte fout bij uitlezen van geometrie")
-        st.error(
-            "De geometrie kon niet worden gelezen. Controleer het "
-            "STIX-bestand of neem contact op met de beheerder."
-        )
-        return
-
-    x_values = [row["x"] for row in original_rows]
+def show_geometry_metrics(rows: list[dict[str, Any]], prefix: str = "") -> None:
+    """Toon bereik en aantal punten van geometrie."""
+    x_values = [row["x"] for row in rows]
     left, middle, right = st.columns(3)
-    left.metric("Minimale X", f"{min(x_values):.3f}")
-    middle.metric("Maximale X", f"{max(x_values):.3f}")
-    right.metric("Aantal geometriepunten", len(original_rows))
-
-    st.plotly_chart(
-        build_geometry_figure(original_rows),
-        use_container_width=True,
-        key="original_geometry_chart",
-    )
-    st.divider()
-    st.subheader("CSV-export")
-    export_type = st.radio(
-        "Welke gegevens wil je downloaden?",
-        ("Volledige geometrie", "Enkel dwarsprofiel"),
-        horizontal=True,
-        key="original_geometry_export_type",
-    )
-
-    export_rows = (
-        extract_cross_section_rows(original_rows)
-        if export_type == "Enkel dwarsprofiel"
-        else original_rows
-    )
-    if export_type == "Enkel dwarsprofiel":
-        st.caption(
-            "Het dwarsprofiel is de bovencontour van de geometrie: per "
-            "X-positie wordt de hoogste doorsnijding met de laagpolygonen gebruikt."
-        )
-        st.plotly_chart(
-            build_geometry_figure(export_rows),
-            use_container_width=True,
-            key="original_cross_section_chart",
-        )
-
-    st.download_button(
-        f"Download {export_type.lower()} als CSV",
-        data=geometry_rows_to_csv(export_rows),
-        file_name=make_original_csv_name(input_name, export_type),
-        mime="text/csv",
-        key="download_original_geometry_csv",
-        type="primary",
-    )
+    left.metric(f"{prefix}Minimale X", f"{min(x_values):.3f}")
+    middle.metric(f"{prefix}Maximale X", f"{max(x_values):.3f}")
+    right.metric("Aantal geometriepunten", len(rows))
 
 
-def render_edit_tab(
+def run_operation(
     input_data: bytes,
     input_name: str,
     input_digest: str,
+    operation: str,
+    existing_x_to_zero: float,
 ) -> None:
-    """Toon bewerkingen en downloads voor het aangepaste model."""
-    st.subheader("Geometrie bewerken")
-    operation = st.radio(
-        "Bewerking",
-        (OPERATION_SHIFT, OPERATION_MIRROR),
-        horizontal=True,
-        key="operation",
-        on_change=clear_result,
-    )
-
-    with st.form("dstability_form"):
-        existing_x_to_zero = st.number_input(
-            "Bestaande X-waarde die X = 0 moet worden",
-            value=0.0,
-            format="%.3f",
-            disabled=operation != OPERATION_SHIFT,
-        )
-        submitted = st.form_submit_button(
-            "Bestand verwerken",
-            type="primary",
-        )
-
-    if submitted:
-        try:
-            with st.spinner("STIX-bestand verwerken..."):
-                output, min_x, max_x, rows = process_stix(
-                    input_data,
-                    operation,
-                    float(existing_x_to_zero),
-                )
-            message = (
-                f"De oorspronkelijke X-waarde {existing_x_to_zero:.3f} "
-                "is nu X = 0.000."
-                if operation == OPERATION_SHIFT
-                else "Het model is gespiegeld rond X = 0."
+    """Voer een gekozen bewerking uit en bewaar het resultaat."""
+    try:
+        with st.spinner(f"{operation} uitvoeren..."):
+            output, min_x, max_x, rows = process_stix(
+                input_data, operation, existing_x_to_zero
             )
-            st.session_state[RESULT_KEY] = {
-                "schema_version": RESULT_SCHEMA_VERSION,
-                "operation": operation,
-                "input_digest": input_digest,
-                "data": output,
-                "file_name": make_output_name(input_name, operation),
-                "message": message,
-                "min_x": min_x,
-                "max_x": max_x,
-                "geometry_rows": rows,
-            }
-        except (ValueError, OSError, AttributeError, TypeError) as exc:
-            clear_result()
-            st.error(f"Het bestand kon niet worden verwerkt: {exc}")
-        except Exception:
-            clear_result()
-            LOGGER.exception("Onverwachte fout bij verwerking van STIX-bestand")
-            st.error(
-                "Het bestand kon niet worden verwerkt. Controleer het "
-                "STIX-bestand of neem contact op met de beheerder."
-            )
-
-    result = get_valid_result(input_digest, operation)
-    if result is None:
-        st.info(
-            "Kies een bewerking en klik op 'Bestand verwerken' om een "
-            "aangepast STIX-bestand te maken."
+        message = (
+            f"De oorspronkelijke X-waarde {existing_x_to_zero:.3f} "
+            "is nu X = 0.000."
+            if operation == OPERATION_SHIFT
+            else "Het model is gespiegeld rond X = 0."
         )
-        return
-
-    st.success(result["message"])
-    left, middle, right = st.columns(3)
-    left.metric("Nieuwe minimale X", f"{result['min_x']:.3f}")
-    middle.metric("Nieuwe maximale X", f"{result['max_x']:.3f}")
-    right.metric("Aantal geometriepunten", len(result["geometry_rows"]))
-
-    st.subheader("Bewerkte geometrie")
-    st.plotly_chart(
-        build_geometry_figure(result["geometry_rows"]),
-        use_container_width=True,
-        key="processed_geometry_chart",
-    )
-    st.download_button(
-        "Download verwerkt STIX-bestand",
-        data=result["data"],
-        file_name=result["file_name"],
-        mime="application/octet-stream",
-        key="download_processed_stix",
-        type="primary",
-    )
-    csv_name = f"{Path(result['file_name']).stem}_geometrie.csv"
-    st.download_button(
-        "Download bewerkte geometrie als CSV",
-        data=geometry_rows_to_csv(result["geometry_rows"]),
-        file_name=csv_name,
-        mime="text/csv",
-        key="download_processed_geometry_csv",
-    )
+        st.session_state[RESULT_KEY] = {
+            "schema_version": RESULT_SCHEMA_VERSION,
+            "operation": operation,
+            "input_digest": input_digest,
+            "data": output,
+            "file_name": make_output_name(input_name, operation),
+            "message": message,
+            "min_x": min_x,
+            "max_x": max_x,
+            "geometry_rows": rows,
+        }
+    except (ValueError, OSError, AttributeError, TypeError) as exc:
+        clear_result()
+        st.error(f"Het bestand kon niet worden verwerkt: {exc}")
+    except Exception:
+        clear_result()
+        LOGGER.exception("Onverwachte fout bij verwerking van STIX-bestand")
+        st.error(
+            "Het bestand kon niet worden verwerkt. Controleer het "
+            "STIX-bestand of neem contact op met de beheerder."
+        )
 
 
 def main() -> None:
-    """Render de Streamlit-app."""
+    """Render de Streamlit-app op een enkele pagina."""
     st.set_page_config(
         page_title="D-Stability geometriebewerker",
         page_icon="📐",
@@ -735,8 +486,8 @@ def main() -> None:
     )
     st.title("D-Stability geometriebewerker")
     st.write(
-        "Upload een `.stix`-bestand. Je kunt de oorspronkelijke geometrie "
-        "direct bekijken en downloaden, of het model verschuiven of spiegelen."
+        "Upload een `.stix`-bestand, bekijk of download de oorspronkelijke "
+        "geometrie en kies daarna direct voor verschuiven of spiegelen."
     )
 
     uploaded = st.file_uploader(
@@ -749,29 +500,122 @@ def main() -> None:
         st.info("Upload een STIX-bestand om de geometrie te bekijken.")
         return
 
-    try:
-        input_data = uploaded.getvalue()
-    except (AttributeError, OSError) as exc:
-        st.error(f"Het geuploade bestand kon niet worden gelezen: {exc}")
-        return
-
+    input_data = uploaded.getvalue()
     if not input_data:
         st.error("Het geuploade bestand is leeg.")
         return
     if len(input_data) > MAX_UPLOAD_BYTES:
         st.error("Het bestand is groter dan de toegestane 100 MB.")
         return
-
     input_digest = hashlib.sha256(input_data).hexdigest()
-    geometry_tab, edit_tab = st.tabs(
-        ["Geometrie bekijken en downloaden", "Bewerken en exporteren"]
+
+    try:
+        with st.spinner("Oorspronkelijke geometrie uitlezen..."):
+            original_rows = read_original_geometry(input_data)
+    except (ValueError, OSError, AttributeError, TypeError) as exc:
+        st.error(f"De geometrie kon niet worden gelezen: {exc}")
+        return
+    except Exception:
+        LOGGER.exception("Onverwachte fout bij uitlezen van geometrie")
+        st.error(
+            "De geometrie kon niet worden gelezen. Controleer het "
+            "STIX-bestand of neem contact op met de beheerder."
+        )
+        return
+
+    st.header("1. Oorspronkelijke geometrie")
+    show_geometry_metrics(original_rows)
+    st.plotly_chart(
+        build_geometry_figure(original_rows, "Oorspronkelijke geometrie"),
+        use_container_width=True,
+        key="original_geometry_chart",
+    )
+    original_stem = Path(Path(uploaded.name).name).stem or "dstability"
+    st.download_button(
+        "Download oorspronkelijke geometrie als CSV",
+        data=geometry_rows_to_csv(original_rows),
+        file_name=f"{original_stem}_geometrie_origineel.csv",
+        mime="text/csv",
+        key="download_original_geometry_csv",
     )
 
-    with geometry_tab:
-        render_original_geometry_tab(input_data, uploaded.name)
+    st.divider()
+    st.header("2. Geometrie bewerken")
+    st.caption(
+        "Vul voor verschuiven de bestaande X-waarde in die X = 0 moet "
+        "worden. Spiegelen gebeurt altijd rond X = 0."
+    )
+    existing_x_to_zero = st.number_input(
+        "Bestaande X-waarde die X = 0 moet worden",
+        value=0.0,
+        format="%.3f",
+        key="existing_x_to_zero",
+    )
+    shift_column, mirror_column, spacer = st.columns([1, 1, 3])
+    shift_clicked = shift_column.button(
+        "Verschuiven",
+        type="primary",
+        use_container_width=True,
+        key="shift_button",
+    )
+    mirror_clicked = mirror_column.button(
+        "Spiegelen",
+        use_container_width=True,
+        key="mirror_button",
+    )
 
-    with edit_tab:
-        render_edit_tab(input_data, uploaded.name, input_digest)
+    if shift_clicked:
+        run_operation(
+            input_data,
+            uploaded.name,
+            input_digest,
+            OPERATION_SHIFT,
+            float(existing_x_to_zero),
+        )
+    elif mirror_clicked:
+        run_operation(
+            input_data,
+            uploaded.name,
+            input_digest,
+            OPERATION_MIRROR,
+            0.0,
+        )
+
+    result = get_valid_result(input_digest)
+    if result is None:
+        return
+
+    st.divider()
+    st.header("3. Resultaat")
+    st.success(result["message"])
+    show_geometry_metrics(result["geometry_rows"], prefix="Nieuwe ")
+    st.plotly_chart(
+        build_geometry_figure(
+            result["geometry_rows"],
+            f"Bewerkte geometrie: {result['operation']}",
+        ),
+        use_container_width=True,
+        key="processed_geometry_chart",
+    )
+    download_left, download_right = st.columns(2)
+    download_left.download_button(
+        "Download verwerkt STIX-bestand",
+        data=result["data"],
+        file_name=result["file_name"],
+        mime="application/octet-stream",
+        key="download_processed_stix",
+        type="primary",
+        use_container_width=True,
+    )
+    csv_name = f"{Path(result['file_name']).stem}_geometrie.csv"
+    download_right.download_button(
+        "Download bewerkte geometrie als CSV",
+        data=geometry_rows_to_csv(result["geometry_rows"]),
+        file_name=csv_name,
+        mime="text/csv",
+        key="download_processed_geometry_csv",
+        use_container_width=True,
+    )
 
 
 if __name__ == "__main__":

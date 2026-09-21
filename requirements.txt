@@ -1,5 +1,5 @@
+d-geolib==2.9.1
 streamlit>=1.40,<2
 plotly>=5.24,<7
-pydantic>=2.10,<3
-pydantic-settings>=2.6,<3
-d-geolib==2.9.1
+pydantic>=1.10,<3
+pytest>=8,<10

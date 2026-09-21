@@ -65,7 +65,8 @@ def get_valid_result() -> dict[str, Any] | None:
     return result
 
 
-def collect_geometry_x(model: DStabilityModel) -> list"""Verzamel alle X-coordinaten uit de geometrie."""
+def collect_geometry_x(model: DStabilityModel) -> list:
+    """Verzamel alle X-coordinaten uit de geometrie."""
     x_values: list[float] = []
 
     geometries = getattr(

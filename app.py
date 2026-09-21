@@ -27,7 +27,8 @@ OPERATION_SHIFT = "Verschuiven"
 OPERATION_MIRROR = "Spiegelen"
 
 
-def iter_items(value: Any) -> Iterable"""Geef een lege iterable terug wanneer een collectie ontbreekt."""
+def iter_items(value: Any) -> Iterable:
+    """Geef een lege iterable terug wanneer een collectie ontbreekt."""
     return value or ()
 
 
